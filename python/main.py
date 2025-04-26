@@ -29,70 +29,88 @@ load_trained_faces()
 
 # Serial communication with Arduino
 # arduino = serial.Serial('COM3', 9600, timeout=1)
-arduino = serial.Serial('/dev/cu.usbmodem11201', 9600, timeout=1)
+arduino = serial.Serial('/dev/cu.usbmodem140111', 9600, timeout=1)
 
 
 time.sleep(2)  # Allow time for Arduino to initialize
 
 # Known faces (should match your training data)
 known_faces = {
-    0: "John Doe",
-    1: "Jane Smith"
+    0: "Sai",
     # Add more as needed
 }
 
 
 def train_new_face(name):
-    # Capture face images and train the model
-    face_samples = []
-    ids = []
+    try:
+        # Ensure connection is alive
+        if not arduino.is_open:
+            arduino.open()
 
-    # Get the next available ID
-    new_id = max(known_faces.keys()) + 1 if known_faces else 0
+        # Add small delay after opening
+        time.sleep(2)
+        # Capture face images and train the model
+        face_samples = []
+        ids = []
 
-    cam = cv2.VideoCapture(0)
-    print(f"Capturing training images for {name}. Please look at the camera...")
+        # Get the next available ID
+        new_id = max(known_faces.keys()) + 1 if known_faces else 0
 
-    count = 0
-    while count < 30:  # Capture 30 samples
-        ret, img = cam.read()
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        faces = face_cascade.detectMultiScale(gray, 1.3, 5)
+        cam = cv2.VideoCapture(1)
+        print(f"Capturing training images for {name}. Please look at the camera...")
 
-        for (x, y, w, h) in faces:
-            cv2.rectangle(img, (x, y), (x + w, y + h), (255, 0, 0), 2)
-            count += 1
-            face_samples.append(gray[y:y + h, x:x + w])
-            ids.append(new_id)
+        count = 0
+        while count < 30:  # Capture 30 samples
+            ret, img = cam.read()
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(gray, 1.3, 5)
 
-        cv2.imshow('Training', img)
-        if cv2.waitKey(100) & 0xff == 27:  # ESC to exit
-            break
+            for (x, y, w, h) in faces:
+                cv2.rectangle(img, (x, y), (x + w, y + h), (255, 0, 0), 2)
+                count += 1
+                face_samples.append(gray[y:y + h, x:x + w])
+                ids.append(new_id)
 
-    cam.release()
-    cv2.destroyAllWindows()
+            cv2.imshow('Training', img)
+            if cv2.waitKey(100) & 0xff == 27:  # ESC to exit
+                break
 
-    # Train the model
-    recognizer.update(face_samples, np.array(ids))
-    recognizer.write('trainer.yml')
-    known_faces[new_id] = name
+        cam.release()
+        cv2.destroyAllWindows()
 
-    # Enroll fingerprint
-    print("Please place your finger on the sensor to enroll...")
-    arduino.write(b'E')  # Send enroll command
-    arduino.write(str(new_id).encode())  # Send ID
+        # Train the model
+        recognizer.update(face_samples, np.array(ids))
+        recognizer.write('trainer.yml')
+        known_faces[new_id] = name
 
-    response = ""
-    while "Enrolled" not in response:
-        if arduino.in_waiting > 0:
-            response = arduino.readline().decode().strip()
-            print(response)
+        # Enroll fingerprint
+        print("Please place your finger on the sensor to enroll...")
+        arduino.write(b'E')  # Send enroll command
+        arduino.write(str(new_id).encode())  # Send ID
 
-    print(f"Successfully enrolled {name} with ID {new_id}")
+        response = ""
+        while "Enrolled" not in response:
+            if arduino.in_waiting > 0:
+                response = arduino.readline().decode().strip()
+                print(response)
+
+        print(f"Successfully enrolled {name} with ID {new_id}")
+    except serial.SerialException as e:
+        print(f"Serial error: {e}")
+        print("Reconnecting...")
+        reconnect_arduino()
+        train_new_face(name)  # Retry
+
+def reconnect_arduino():
+    global arduino
+    arduino.close()
+    time.sleep(1)
+    arduino.open()
+    time.sleep(2)  # Important wait period
 
 
 def recognize_face():
-    cam = cv2.VideoCapture(0)
+    cam = cv2.VideoCapture(1)
     recognized = False
     face_id = None
 
