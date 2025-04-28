@@ -5,6 +5,7 @@ import serial
 import time
 import sqlite3
 from datetime import datetime
+from time import sleep
 
 # Database setup
 conn = sqlite3.connect('attendance.db')
@@ -103,11 +104,16 @@ def train_new_face(name):
 
 def reconnect_arduino():
     global arduino
-    arduino.close()
-    time.sleep(1)
-    arduino.open()
-    time.sleep(2)  # Important wait period
-
+    print("Reconnecting to Arduino...")
+    try:
+        if arduino.is_open:
+            arduino.close()
+        time.sleep(1.5)
+        arduino = serial.Serial('/dev/cu.usbmodem140111', 9600, timeout=1)
+        time.sleep(2)  # Important wait period
+        print("Arduino reconnected successfully")
+    except Exception as e:
+        print(f"Failed to reconnect: {e}")
 
 def recognize_face():
     cam = cv2.VideoCapture(1)
@@ -142,42 +148,93 @@ def recognize_face():
 
 def verify_fingerprint():
     print("Please place your finger on the sensor...")
-    arduino.write(b'S')  # Send scan command
 
+    # Clear input buffer before sending command
+    arduino.reset_input_buffer()
+
+    arduino.write(b'S')  # Send scan command
+    print("Scan command sent")
+
+    # Give Arduino time to process
+    start_time = time.time()
     response = ""
-    while not response.startswith("ID:"):
+    timeout = 15  # seconds
+
+    while (time.time() - start_time) < timeout:
         if arduino.in_waiting > 0:
             response = arduino.readline().decode().strip()
+            print(f"Arduino response: {response}")
+            if response.startswith("ID:"):
+                fingerprint_id = int(response.split(":")[1])
+                return fingerprint_id if fingerprint_id != -1 else None
+        time.sleep(0.1)  # Short delay to prevent CPU hogging
 
-    fingerprint_id = int(response.split(":")[1])
-    return fingerprint_id if fingerprint_id != -1 else None
-
-
+    print("Fingerprint verification timed out")
+    return None
 def mark_attendance():
+    max_attempts = 3
+    attempt = 0
+
     print("Starting face recognition...")
     face_id = recognize_face()
 
     if face_id is not None and face_id in known_faces:
         print(f"Face recognized as {known_faces[face_id]}")
-        print("Verifying fingerprint...")
-        fingerprint_id = verify_fingerprint()
 
-        if fingerprint_id == face_id:
-            print("Fingerprint matched!")
-            now = datetime.now()
-            date = now.strftime("%Y-%m-%d")
-            time = now.strftime("%H:%M:%S")
+        while attempt < max_attempts:
+            attempt += 1
+            print(f"Verifying fingerprint (attempt {attempt}/{max_attempts})...")
 
-            c.execute(
-                "INSERT INTO attendance (id, name, date, time, face_recognized, fingerprint_matched) VALUES (?, ?, ?, ?, ?, ?)",
-                (face_id, known_faces[face_id], date, time, 1, 1))
-            conn.commit()
-            print("Attendance marked successfully!")
-        else:
-            print("Fingerprint verification failed!")
+            try:
+                # Clear any pending data in serial buffer
+                arduino.reset_input_buffer()
+
+                # Send scan command
+                arduino.write(b'S')
+                print("Scan command sent to Arduino")
+
+                # Wait for fingerprint to be placed
+                print("Please place your finger on the sensor...")
+
+                # Read with timeout
+                start_time = time.time()
+                response = ""
+
+                while not response.startswith("ID:") and (time.time() - start_time) < 10:
+                    if arduino.in_waiting > 0:
+                        response = arduino.readline().decode().strip()
+                        print(f"Arduino response: {response}")
+
+                if not response.startswith("ID:"):
+                    print("Timeout waiting for fingerprint data")
+                    continue
+
+                fingerprint_id = int(response.split(":")[1])
+                print(f"Fingerprint ID detected: {fingerprint_id}")
+
+                if fingerprint_id == face_id:
+                    print("Fingerprint matched!")
+                    now = datetime.now()
+                    date = now.strftime("%Y-%m-%d")
+                    time_str = now.strftime("%H:%M:%S")
+
+                    c.execute(
+                        "INSERT INTO attendance (id, name, date, time, face_recognized, fingerprint_matched) VALUES (?, ?, ?, ?, ?, ?)",
+                        (face_id, known_faces[face_id], date, time_str, 1, 1))
+                    conn.commit()
+                    print("Attendance marked successfully!")
+                    return
+                else:
+                    print(f"Fingerprint verification failed! Expected ID {face_id}, got ID {fingerprint_id}")
+
+            except Exception as e:
+                print(f"Error during fingerprint verification: {e}")
+                # Try to reconnect if there's a communication issue
+                reconnect_arduino()
+
+        print("Failed to verify fingerprint after multiple attempts")
     else:
         print("Face not recognized!")
-
 
 def main_menu():
     while True:
